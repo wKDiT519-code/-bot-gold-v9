@@ -60,7 +60,6 @@ def calc_indicators(df):
     loss = -delta.where(delta<0,0).rolling(14).mean()
     rs = gain/loss
     df["rsi"] = 100 - (100/(1+rs))
-    # TR
     hl = df["high"] - df["low"]
     hc = (df["high"] - df["close"].shift()).abs()
     lc = (df["low"] - df["close"].shift()).abs()
@@ -133,7 +132,13 @@ def bot_loop():
                     amount=min(RISK_PER_TRADE, portfolio["balance"]*0.1)
                     portfolio["position"]={"side":"LONG","entry":entry,"amount":amount,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"opened_at":time.time()}
                     last_signal=time.time()
-                    send_telegram(f"🚀 *GOLD SIGNAL LONG*\nXAU ${entry:.2f} RSI {rsi:.1f} ADX {adx:.1f} ATR {atr:.2f}\nTP1 ${tp1:.2f} TP2 ${tp2:.2f} TP3 ${tp3:.2f}\nSL ${sl:.2f}\nเปิด ${amount:.2f} x{LEVERAGE} พอร์ตทอง ${portfolio['balance']:.2f}")
+                    # Format แบบ BTC V168
+                    msg = f"🚀 SIGNAL LONG - PAPER OPEN\n"
+                    msg += f"XAU ${entry:,.2f} RSI {rsi:.1f} ADX {adx:.1f}\n"
+                    msg += f"TP1 ${tp1:,.2f} TP2 ${tp2:,.2f} TP3 ${tp3:,.2f}\n"
+                    msg += f"SL ${sl:,.2f}\n"
+                    msg += f"เปิด ${amount:.2f} x{LEVERAGE} พอร์ต ${portfolio['balance']:.2f}"
+                    send_telegram(msg)
         except Exception as e:
             print(f"GOLD Bot error {e}", flush=True)
             import traceback; traceback.print_exc()
