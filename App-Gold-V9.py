@@ -1,5 +1,6 @@
+
 import os, time, threading, requests, sys
-print("=== BOT GOLD v9 STARTING $100 ===", flush=True)
+print("=== BOT GOLD v9.1 FIXED FOR RENDER ===", flush=True)
 from flask import Flask, jsonify
 import ccxt
 import pandas as pd
@@ -9,12 +10,12 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "") or os.getenv("TELEGRAM_CHAT_ID", "")
 
-SYMBOL = "XAU/USDT"   # ทอง
-TIMEFRAME = "1h"      # 1H กรองหลอก
+SYMBOL = "XAU/USDT"
+TIMEFRAME = "1h"
 START_BALANCE = 100.0
-RISK_PER_TRADE = 10.0  # ทองเสี่ยงน้อยกว่า BTC
-LEVERAGE = 5          # ทอง x5 พอ
-COOLDOWN_SEC = 60*60  # ทอง 1H เทรดชั่วโมงละครั้งพอ
+RISK_PER_TRADE = 10.0
+LEVERAGE = 5
+COOLDOWN_SEC = 60*60
 
 portfolio = {
     "balance": START_BALANCE,
@@ -26,13 +27,21 @@ portfolio = {
     "position": None,
     "last_price": 0,
     "last_update": "",
-    "bot_type": "GOLD"
+    "bot_type": "GOLD",
+    "status": "starting"
 }
 
-print(f"GOLD BOT: {SYMBOL} {TIMEFRAME} TELEGRAM set {bool(TELEGRAM_TOKEN)} CHAT {bool(CHAT_ID)}", flush=True)
+print(f"CONFIG: {SYMBOL} {TIMEFRAME} TG:{bool(TELEGRAM_TOKEN)} CHAT:{bool(CHAT_ID)}", flush=True)
 
+# FIX 1: enableRateLimit + timeout
 try:
-    exchange = ccxt.mexc({"enableRateLimit": True})
+    exchange = ccxt.mexc({
+        'enableRateLimit': True,
+        'timeout': 15000,
+    })
+    # load markets to avoid fail
+    print("Loading MEXC markets...", flush=True)
+    # exchange.load_markets() # อาจช้า ข้ามไปก่อน
     print("MEXC OK", flush=True)
 except Exception as e:
     print(f"MEXC FAIL {e}", flush=True)
@@ -40,19 +49,31 @@ except Exception as e:
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(f"SKIP TG: {msg[:60]}", flush=True)
+        print(f"SKIP TG (no env): {msg[:80]}", flush=True)
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-        print(f"TG sent {r.status_code}", flush=True)
+        # FIX 2: disable Markdown parsing to avoid fail
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+        print(f"TG sent {r.status_code} {r.text[:100]}", flush=True)
     except Exception as e:
         print(f"TG error {e}", flush=True)
 
 def get_ohlcv():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=150)
-    df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","vol"])
-    return df
+    if exchange is None:
+        raise Exception("Exchange not initialized")
+    # FIX 3: retry logic
+    for i in range(3):
+        try:
+            ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=150)
+            df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","vol"])
+            if len(df) < 50:
+                raise Exception(f"Not enough candles {len(df)}")
+            return df
+        except Exception as e:
+            print(f"fetch_ohlcv retry {i+1} fail {e}", flush=True)
+            time.sleep(2)
+    raise Exception("fetch_ohlcv failed after 3 retries")
 
 def calc_indicators(df):
     delta = df["close"].diff()
@@ -82,7 +103,7 @@ def paper_check_close(price):
             portfolio["balance"]+=pnl
             portfolio["losses"]+=1
             portfolio["trades"].append({"pnl":pnl,"result":"SL","price":price})
-            send_telegram(f"🛑 *GOLD SL HIT* LONG\nEntry ${pos['entry']:.2f} -> SL ${pos['sl']:.2f}\nPnL ${pnl:.2f}\n💰 พอร์ตทอง ${portfolio['balance']:.2f} ({(portfolio['balance']/START_BALANCE-1)*100:+.2f}%) W{portfolio['wins']} L{portfolio['losses']}")
+            send_telegram(f"GOLD SL HIT LONG\nEntry ${pos['entry']:.2f} -> SL ${pos['sl']:.2f}\nPnL ${pnl:.2f}\nพอร์ตทอง ${portfolio['balance']:.2f} ({(portfolio['balance']/START_BALANCE-1)*100:+.2f}%) W{portfolio['wins']} L{portfolio['losses']}")
             portfolio["position"]=None
             return
         if price >= pos["tp3"]:
@@ -93,14 +114,15 @@ def paper_check_close(price):
             portfolio["balance"]+=pnl
             portfolio["wins"]+=1
             portfolio["trades"].append({"pnl":pnl,"result":"TP3","price":price})
-            send_telegram(f"✅ *GOLD TP3 HIT* LONG\nEntry ${pos['entry']:.2f}\nTPs ${pos['tp1']:.1f} / ${pos['tp2']:.1f} / ${pos['tp3']:.1f}\nPnL +${pnl:.2f}\n💰 พอร์ตทอง ${portfolio['balance']:.2f} ({(portfolio['balance']/START_BALANCE-1)*100:+.2f}%) W{portfolio['wins']} L{portfolio['losses']}")
+            send_telegram(f"GOLD TP3 HIT LONG\nEntry ${pos['entry']:.2f}\nTPs ${pos['tp1']:.1f} / ${pos['tp2']:.1f} / ${pos['tp3']:.1f}\nPnL +${pnl:.2f}\nพอร์ตทอง ${portfolio['balance']:.2f} ({(portfolio['balance']/START_BALANCE-1)*100:+.2f}%) W{portfolio['wins']} L{portfolio['losses']}")
             portfolio["position"]=None
 
 def bot_loop():
     print("GOLD LOOP STARTED", flush=True)
+    portfolio["status"] = "running"
     last_signal=0
-    time.sleep(5)
-    send_telegram(f"🏆 Bot GOLD v9 LIVE!\n💰 พอร์ตทองจำลอง ${START_BALANCE}\nSymbol {SYMBOL} TF {TIMEFRAME}\nRisk ${RISK_PER_TRADE}/ไม้ x{LEVERAGE}\nATR SL x2.2 TP x1.5/3.0/4.5\nADX>25 RSI 55-72")
+    time.sleep(3)
+    send_telegram(f"Bot GOLD v9.1 LIVE!\nพอร์ตทองจำลอง ${START_BALANCE}\nSymbol {SYMBOL} TF {TIMEFRAME}\nRisk ${RISK_PER_TRADE}/ไม้ x{LEVERAGE}\nATR SL x2.2 TP x1.5/3.0/4.5\nADX>25 RSI 55-72\nRender Fixed Version")
     while True:
         try:
             df = get_ohlcv()
@@ -113,13 +135,12 @@ def bot_loop():
             
             portfolio["last_price"]=price
             portfolio["last_update"]=time.strftime("%H:%M:%S")
-            print(f"GOLD SCAN {portfolio['last_update']} XAU ${price:.2f} RSI {rsi:.1f} ADX {adx:.1f} ATR {atr:.2f} Bal ${portfolio['balance']:.2f} Pos {portfolio['position'] is not None}", flush=True)
+            print(f"SCAN {portfolio['last_update']} XAU ${price:.2f} RSI {rsi:.1f} ADX {adx:.1f} ATR {atr:.2f} Bal ${portfolio['balance']:.2f} Pos {portfolio['position'] is not None}", flush=True)
             
             paper_check_close(price)
             
             if portfolio["position"] is None and time.time()-last_signal>COOLDOWN_SEC:
                 trend_up = last["plus_di"] > last["minus_di"]
-                # สูตรทอง: ADX>25 RSI 55-72
                 if adx>25 and 55<rsi<72 and trend_up:
                     entry=price
                     sl=entry - atr*2.2
@@ -129,15 +150,16 @@ def bot_loop():
                     amount=min(RISK_PER_TRADE, portfolio["balance"]*0.1)
                     portfolio["position"]={"side":"LONG","entry":entry,"amount":amount,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"opened_at":time.time()}
                     last_signal=time.time()
-                    send_telegram(f"🚀 *GOLD SIGNAL LONG*\nXAU ${entry:.2f} RSI {rsi:.1f} ADX {adx:.1f} ATR {atr:.2f}\nTP1 ${tp1:.2f} TP2 ${tp2:.2f} TP3 ${tp3:.2f}\nSL ${sl:.2f}\nเปิด ${amount:.2f} x{LEVERAGE} พอร์ตทอง ${portfolio['balance']:.2f}")
+                    send_telegram(f"GOLD SIGNAL LONG\nXAU ${entry:.2f} RSI {rsi:.1f} ADX {adx:.1f} ATR {atr:.2f}\nTP1 ${tp1:.2f} TP2 ${tp2:.2f} TP3 ${tp3:.2f}\nSL ${sl:.2f}\nเปิด ${amount:.2f} x{LEVERAGE} พอร์ตทอง ${portfolio['balance']:.2f}")
         except Exception as e:
-            print(f"GOLD Bot error {e}", flush=True)
+            portfolio["status"] = f"error: {e}"
+            print(f"Bot error {e}", flush=True)
             import traceback; traceback.print_exc()
-        time.sleep(300)  # ทอง 1H เช็คทุก 5 นาทีพอ
+        time.sleep(300)
 
 @app.route("/")
 def home():
-    return f"GOLD Bot v9 LIVE - {SYMBOL} ${portfolio['last_price']} Bal ${portfolio['balance']:.2f} W{portfolio['wins']} L{portfolio['losses']} Updated {portfolio['last_update']}"
+    return f"GOLD Bot v9.1 LIVE - {SYMBOL} ${portfolio['last_price']} Bal ${portfolio['balance']:.2f} W{portfolio['wins']} L{portfolio['losses']} Updated {portfolio['last_update']} Status {portfolio['status']}"
 
 @app.route("/portfolio")
 def port():
@@ -147,8 +169,16 @@ def port():
 def health():
     return "OK", 200
 
-threading.Thread(target=bot_loop, daemon=True).start()
-print("Gold Thread started", flush=True)
+# FIX 4: Start thread only once, work with gunicorn
+bot_thread = None
+def start_bot():
+    global bot_thread
+    if bot_thread is None or not bot_thread.is_alive():
+        bot_thread = threading.Thread(target=bot_loop, daemon=True)
+        bot_thread.start()
+        print("Gold Thread started", flush=True)
+
+start_bot()
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",10000))
