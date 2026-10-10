@@ -60,7 +60,11 @@ def calc_indicators(df):
     loss = -delta.where(delta<0,0).rolling(14).mean()
     rs = gain/loss
     df["rsi"] = 100 - (100/(1+rs))
-    df["tr"] = pd.concat([df["high"]-df["low"], (df["high"]-df["close"].shift()).abs(), (df["low"]-df["close"].shift()).abs()], axis=1).max(axis=1)
+    # TR
+    hl = df["high"] - df["low"]
+    hc = (df["high"] - df["close"].shift()).abs()
+    lc = (df["low"] - df["close"].shift()).abs()
+    df["tr"] = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     df["atr"] = df["tr"].rolling(14).mean()
     df["up"] = df["high"].diff()
     df["down"] = -df["low"].diff()
