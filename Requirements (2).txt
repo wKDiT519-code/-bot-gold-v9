@@ -1,0 +1,5 @@
+Flask==2.3.3
+ccxt==4.2.25
+pandas==2.2.2
+requests==2.31.0
+gunicorn==21.2.0

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bot-gold-v9
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn App-Gold-V9:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 120
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+    healthCheckPath: /health
