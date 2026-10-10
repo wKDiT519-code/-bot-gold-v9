@@ -1,2 +1,2 @@
-# -bot-gold-v9
+# bot-gold-v9
 trading bot
