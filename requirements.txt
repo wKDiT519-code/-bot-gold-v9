@@ -1,5 +1,4 @@
 Flask
+requests
 ccxt
 pandas
-requests
-gunicorn
