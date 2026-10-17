@@ -1,7 +1,7 @@
 """
-V80 SILVER LOWER FILTER - แก้เงียบ
-V79 ADX28 Vol1.6 สูงเกิน Tr6 เอง WR33.3% PnL-1.15% Pos ไม่มี
-ลดเป็น ADX22 Vol1.2 เท่า BTC ให้เทรดได้
+V81 SILVER MEAN REVERSION - สำหรับ Sideway ใกล้ ATH $55-$58
+V79-V80 Trend Following แพ้หมด WR28-33% PnL-1%~-2% เพราะ Sideway ไม่มีเทรนด์
+เปลี่ยนเป็น Mean Reversion ซื้อขอบล่าง $55 ขายขอบบน $58
 """
 
 import requests, pandas as pd, numpy as np, os, time, json
@@ -55,22 +55,20 @@ def get_klines_silver(days=30):
             for col in ['o','h','l','c','v']: df[col]=df[col].astype(float)
             if len(df)>300: return df, sym
         except: continue
-    try:
-        r=requests.get("https://api.mexc.com/api/v3/klines", params={"symbol":"SILVERUSDT","interval":"15m","limit":1000}, timeout=5)
-        arr=r.json()
-        if isinstance(arr, list) and len(arr)>300:
-            df=pd.DataFrame(arr, columns=['ot','o','h','l','c','v','ct','qv','n','taker_v','taker_qv','ig'])
-            for col in ['o','h','l','c','v']: df[col]=df[col].astype(float)
-            return df.tail(30*96), "SILVERUSDT-SPOT"
-    except: pass
     return None, None
 
 def calc_indicators(df):
-    df['EMA12']=df['c'].ewm(span=12, adjust=False).mean()
-    df['EMA26']=df['c'].ewm(span=26, adjust=False).mean()
-    df['EMA50']=df['c'].ewm(span=50, adjust=False).mean()
+    # Bollinger + RSI + VWAP สำหรับ Mean Reversion
+    df['SMA20']=df['c'].rolling(20).mean()
+    df['STD20']=df['c'].rolling(20).std()
+    df['BB_UP']=df['SMA20']+2*df['STD20']
+    df['BB_LOW']=df['SMA20']-2*df['STD20']
+    df['BB_WIDTH']=(df['BB_UP']-df['BB_LOW'])/df['SMA20']*100
     delta=df['c'].diff(); gain=delta.where(delta>0,0).rolling(14).mean(); loss=-delta.where(delta<0,0).rolling(14).mean()
     df['RSI']=100-(100/(1+gain/(loss.replace(0,0.001))))
+    df['TP']=(df['h']+df['l']+df['c'])/3; df['TPV']=df['TP']*df['v']; df['VWAP']=df['TPV'].rolling(20).sum()/df['v'].rolling(20).sum()
+    df['V_SMA20']=df['v'].rolling(20).mean(); df['VolSpike']=df['v']/df['V_SMA20']
+    # ADX สำหรับกรอง Sideway (ADX ต่ำ = Sideway = เหมาะกับ Mean Reversion)
     df['H-L']=df['h']-df['l']; df['H-pC']=(df['h']-df['c'].shift(1)).abs(); df['L-pC']=(df['l']-df['c'].shift(1)).abs()
     df['TR']=df[['H-L','H-pC','L-pC']].max(axis=1)
     df['H-pH']=df['h']-df['h'].shift(1); df['pL-L']=df['l'].shift(1)-df['l']
@@ -79,35 +77,33 @@ def calc_indicators(df):
     df['TR14']=df['TR'].rolling(14).sum(); df['+DM14']=pd.Series(df['+DM']).rolling(14).sum(); df['-DM14']=pd.Series(df['-DM']).rolling(14).sum()
     df['+DI']=100*df['+DM14']/df['TR14']; df['-DI']=100*df['-DM14']/df['TR14']
     df['DX']=100*(df['+DI']-df['-DI']).abs()/(df['+DI']+df['-DI']).replace(0,0.001); df['ADX']=df['DX'].rolling(14).mean()
-    df['TP']=(df['h']+df['l']+df['c'])/3; df['TPV']=df['TP']*df['v']; df['VWAP']=df['TPV'].rolling(20).sum()/df['v'].rolling(20).sum()
-    df['V_SMA20']=df['v'].rolling(20).mean(); df['VolSpike']=df['v']/df['V_SMA20']
     return df.dropna()
 
-def dist_pct(price, step): return abs(price-round(price/step)*step)/price*100
-
-def run_bt_silver(df):
-    # V80 LOWER FILTER: ลด ADX28->22 Vol1.6->1.2 เท่า BTC ให้เทรดได้
-    # SILVER ผันผวนแรงกว่า BTC แต่ Filter สูงเกิน Tr6 เงียบ
-    cfg={"tp":3.0,"sl":1.5,"max_hold":96,"adx":22,"di":18,"vol":1.2,"round_step":0.5,"round_pct":0.3,"short":True}
-    # TP3.0 SL1.5 RR2.0 Hold24H ADX22 Vol1.2 = ลดลงจาก V79 ADX28 Vol1.6
-    stats={"total":0,"wins":0,"losses":0,"pnl_sum":0.0,"max_dd":0,"skip":{"adx":0,"vol":0,"round":0}}
+def run_bt_mean_rev(df):
+    # V81 MEAN REVERSION: เทรด Sideway $55-$58 ใกล้ ATH
+    # Logic: Sideway ต้อง ADX ต่ำ (<22) + BB Width แคบ + RSI Oversold/Overbought
+    # Long: ใกล้ BB Low + RSI<40 + Vol ไม่ต่ำเกิน
+    # Short: ใกล้ BB Up + RSI>60
+    # TP1.5 SL0.8 RR1.875 Hold12H เหมาะ Sideway
+    cfg={"tp":1.5,"sl":0.8,"max_hold":48,"adx_max":22,"bb_width_max":3.0,"vol_min":0.7,"round_step":0.5,"round_pct":0.3}
+    stats={"total":0,"wins":0,"losses":0,"pnl_sum":0.0,"max_dd":0,"skip":{"adx_high":0,"bb_wide":0,"vol_low":0}}
     bal=40.16; high=bal; pos=[]
     for i in range(200, len(df)):
         last=df.iloc[i]; price=float(last['c'])
-        if last['ADX']<cfg["adx"]: stats["skip"]["adx"]+=1; continue
-        if last['VolSpike']<cfg["vol"]: stats["skip"]["vol"]+=1; continue
-        if dist_pct(price, cfg["round_step"])<cfg["round_pct"]: stats["skip"]["round"]+=1; continue
-        up_trend = last['EMA12']>last['EMA26'] and last['EMA26']>last['EMA50'] and price>last['VWAP']
-        down_trend = last['EMA12']<last['EMA26'] and last['EMA26']<last['EMA50'] and price<last['VWAP']
-        up = last['+DI']>last['-DI'] and last['+DI']>cfg["di"] and up_trend
-        down = last['-DI']>last['+DI'] and last['-DI']>cfg["di"] and down_trend and cfg["short"]
+        # Mean Reversion ต้อง Sideway: ADX ต่ำ (ไม่มีเทรนด์) + BB แคบ
+        if last['ADX']>cfg["adx_max"]: stats["skip"]["adx_high"]+=1; continue
+        if last['BB_WIDTH']>cfg["bb_width_max"]: stats["skip"]["bb_wide"]+=1; continue
+        if last['VolSpike']<cfg["vol_min"]: stats["skip"]["vol_low"]+=1; continue
+        # Mean Reversion Entry
+        near_bb_low = price <= last['BB_LOW']*1.02  # ใกล้ขอบล่าง 2%
+        near_bb_up = price >= last['BB_UP']*0.98   # ใกล้ขอบบน 2%
+        rsi_oversold = last['RSI'] <= 40
+        rsi_overbought = last['RSI'] >= 60
+        # Body ต้องไม่เล็กเกิน (มีแรง)
         body = abs(last['c']-last['o']); rng = last['h']-last['l']
-        strong_bull = body > rng*0.3 and last['c']>last['o']
-        strong_bear = body > rng*0.3 and last['o']>last['c']
-        rsi_ok_long = 40 <= last['RSI'] <= 72
-        rsi_ok_short = 28 <= last['RSI'] <= 62
-        buy = up and strong_bull and rsi_ok_long
-        sell = down and strong_bear and rsi_ok_short
+        has_body = body > rng*0.15
+        buy = near_bb_low and rsi_oversold and has_body
+        sell = near_bb_up and rsi_overbought and has_body
         if not pos and buy: pos.append({"entry":price,"side":"long","idx":i})
         elif not pos and sell: pos.append({"entry":price,"side":"short","idx":i})
         if pos:
@@ -134,19 +130,19 @@ def bt_job():
     global bt_results, bt_status, LIVE_PRICE
     bt_status="Running..."
     try:
-        send_telegram(f"📊 [{thai_time()}] V80 SILVER LOWER FILTER เริ่ม BT 30D\nแก้เงียบ V79 ADX28 Vol1.6 Tr6 WR33.3% -> V80 ADX22 Vol1.2 ให้เทรดได้\nTP3.0 SL1.5 RR2.0 Hold24H...")
+        send_telegram(f"📊 [{thai_time()}] V81 SILVER MEAN REV เริ่ม BT 30D\nแก้ Trend แพ้ WR28-33% -> Mean Rev Sideway $55-$58\nADX<22 BB_WIDTH<3% RSI40/60 TP1.5 SL0.8...")
         df, sym = get_klines_silver(30)
         if df is None: bt_status="Fail"; send_telegram("🔴 SILVER ดึงกราฟไม่ได้"); return
         df=calc_indicators(df)
         LIVE_PRICE=float(df.iloc[-1]['c'])
-        s,w,b,c=run_bt_silver(df)
+        s,w,b,c=run_bt_mean_rev(df)
         bt_results["SILVER_USDT"]={"wr":w,"stats":s,"balance":b,"cfg":c,"sym_used":sym,"live_price":LIVE_PRICE}
         bt_status="Done"
         emoji="🟢" if w>=60 and s['pnl_sum']>0 else "🟡" if w>=50 else "🔴"
-        msg=f"{emoji} [{thai_time()}] V80 SILVER LOWER FILTER BT เสร็จ\n{sym} ${LIVE_PRICE:.2f}\nWR {w:.1f}% PnL {s['pnl_sum']:+.2f}% Tr {s['total']} Bal 40.16→{b:.2f}\nDD {s['max_dd']:.1f}% Skip ADX{s['skip']['adx']} Vol{s['skip']['vol']} Round{s['skip']['round']}\n"
-        if w>=60 and s['pnl_sum']>0: msg+="✅ FINAL ผ่าน! WR60%+ PnL บวก ไม่เงียบแล้ว!\n"
-        else: msg+=f"WR {w:.1f}% PnL {s['pnl_sum']:+.2f}% Tr {s['total']}\n"
-        msg+="TP3.0 SL1.5 RR2.0 Hold24H ADX22 Vol1.2 เท่า BTC"
+        msg=f"{emoji} [{thai_time()}] V81 SILVER MEAN REV BT เสร็จ\n{sym} ${LIVE_PRICE:.2f}\nWR {w:.1f}% PnL {s['pnl_sum']:+.2f}% Tr {s['total']} Bal 40.16→{b:.2f}\nDD {s['max_dd']:.1f}% Skip ADXhigh{s['skip']['adx_high']} BBwide{s['skip']['bb_wide']} VolLow{s['skip']['vol_low']}\n"
+        if w>=60 and s['pnl_sum']>0: msg+="✅ FINAL ผ่าน! Mean Rev ชนะ Sideway!\n"
+        else: msg+=f"WR {w:.1f}% PnL {s['pnl_sum']:+.2f}% Tr {s['total']} Mean Rev\n"
+        msg+="ADX<22 BB<3% RSI40/60 TP1.5 SL0.8 Sideway $55-$58"
         send_telegram(msg)
     except Exception as e:
         bt_status=f"Error {e}"
@@ -166,18 +162,18 @@ def handle(text, cid):
     if CHAT_ID and str(cid)!=str(CHAT_ID): return
     t=(text or "").lower().strip()
     if t in ["/stats","/bt"]:
-        if bt_status=="Running...": send_telegram("⏳ SILVER LOWER FILTER กำลังรัน...")
+        if bt_status=="Running...": send_telegram("⏳ SILVER MEAN REV กำลังรัน...")
         elif not bt_results:
             threading.Thread(target=bt_job, daemon=True).start()
-            send_telegram("📊 เริ่ม BT V80 SILVER LOWER FILTER 30D รอ 15 วิ...")
+            send_telegram("📊 เริ่ม BT V81 SILVER MEAN REV 30D รอ 15 วิ...")
         else:
-            b=bt_results["SILVER_USDT"]; send_telegram(f"📊 SILVER {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}% Tr {b['stats']['total']}")
+            b=bt_results["SILVER_USDT"]; send_telegram(f"📊 SILVER MEAN REV {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}% Tr {b['stats']['total']}")
     elif t in ["/status"]:
         b=bt_results.get("SILVER_USDT")
-        if b: send_telegram(f"📍 SILVER {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}% {'✅' if TRADING_ENABLED else '🛑'} Pos {'มี' if False else 'ไม่มี'}")
-        else: send_telegram(f"📍 SILVER {bt_status} {'✅' if TRADING_ENABLED else '🛑'} /bt")
-    elif t in ["/stop"]: TRADING_ENABLED=False; save_trading(False); send_telegram(f"🛑 ปิด SILVER {thai_time()}")
-    elif t in ["/start"]: TRADING_ENABLED=True; save_trading(True); send_telegram(f"✅ เปิด SILVER {thai_time()}")
+        if b: send_telegram(f"📍 SILVER MEAN REV {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}% {'✅' if TRADING_ENABLED else '🛑'} Pos ไม่มี")
+        else: send_telegram(f"📍 SILVER MEAN REV {bt_status} {'✅' if TRADING_ENABLED else '🛑'} /bt")
+    elif t in ["/stop"]: TRADING_ENABLED=False; save_trading(False); send_telegram(f"🛑 ปิด SILVER MEAN REV {thai_time()}")
+    elif t in ["/start"]: TRADING_ENABLED=True; save_trading(True); send_telegram(f"✅ เปิด SILVER MEAN REV {thai_time()}")
 
 def poll():
     off=get_off()
@@ -197,12 +193,12 @@ def poll():
 @app.route('/')
 def home():
     b=bt_results.get("SILVER_USDT")
-    if not b: return f"<h2>V80 SILVER LOWER FILTER {bt_status}</h2>"
-    return f"<h2>SILVER WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}%</h2>"
+    if not b: return f"<h2>V81 SILVER MEAN REV {bt_status}</h2>"
+    return f"<h2>SILVER MEAN REV WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}%</h2>"
 @app.route('/health')
-def health(): return jsonify({"status":"ok","version":"V80 SILVER LOWER FILTER","trading":TRADING_ENABLED,"bt":bt_results,"time":thai_time()})
+def health(): return jsonify({"status":"ok","version":"V81 SILVER MEAN REV","trading":TRADING_ENABLED,"bt":bt_results,"time":thai_time()})
 
-send_telegram(f"🚀 [{thai_time()}] V80 SILVER LOWER FILTER Live\nแก้เงียบ V79 ADX28 Vol1.6 Tr6 WR33.3% -> V80 ADX22 Vol1.2 ให้เทรดได้\nพิมพ์ /bt /status")
+send_telegram(f"🚀 [{thai_time()}] V81 SILVER MEAN REV Live\nแก้ Trend แพ้ WR28-33% -> Mean Rev สำหรับ Sideway $55-$58 ATH\nADX<22 BB<3% RSI40/60 TP1.5 SL0.8 พิมพ์ /bt /status")
 
 threading.Thread(target=lambda: (time.sleep(3), bt_job()), daemon=True).start()
 threading.Thread(target=poll, daemon=True).start()
