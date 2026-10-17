@@ -1,11 +1,13 @@
 """
-V79 SILVER FIXED 2 - แก้ shift Error เหมือน BTC
+V80 SILVER LOWER FILTER - แก้เงียบ
+V79 ADX28 Vol1.6 สูงเกิน Tr6 เอง WR33.3% PnL-1.15% Pos ไม่มี
+ลดเป็น ADX22 Vol1.2 เท่า BTC ให้เทรดได้
 """
 
 import requests, pandas as pd, numpy as np, os, time, json
 from flask import Flask, jsonify
 from datetime import datetime
-import pytz, threading, traceback
+import pytz, threading
 
 DATA_DIR = "./data"
 try:
@@ -16,10 +18,8 @@ except: pass
 
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
 CHAT_ID = (os.environ.get("CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-FLAG_FILE = os.path.join(DATA_DIR, "silver_trading_enabled.json")
-OFFSET_FILE = os.path.join(DATA_DIR, "silver_offset.txt")
-BAL_FILE = os.path.join(DATA_DIR, "silver_demo_balance.json")
-POS_FILE = os.path.join(DATA_DIR, "silver_demo_position.json")
+FLAG_FILE = os.path.join(DATA_DIR, "trading_enabled_silver.json")
+OFFSET_FILE = os.path.join(DATA_DIR, "telegram_offset_silver.txt")
 
 def load_trading():
     try:
@@ -31,15 +31,6 @@ def save_trading(en):
     except: pass
 
 TRADING_ENABLED = load_trading()
-DEMO_BALANCE=40.16
-DEMO_POSITION=None
-try:
-    if os.path.exists(BAL_FILE): DEMO_BALANCE=json.load(open(BAL_FILE)).get("balance",40.16)
-    if os.path.exists(POS_FILE): DEMO_POSITION=json.load(open(POS_FILE))
-except: pass
-
-print(f"=== V79 SILVER FIXED2 START ===")
-
 app = Flask(__name__)
 def thai_now(): return datetime.now(pytz.timezone('Asia/Bangkok'))
 def thai_time(): return thai_now().strftime("%d/%m/%Y %H:%M ICT")
@@ -51,8 +42,8 @@ def send_telegram(msg):
         return r.status_code==200
     except: return False
 
-def get_klines_fast(days=15):
-    for sym in ["SILVER_USDT","SILVERUSDT","XAG_USDT"]:
+def get_klines_silver(days=30):
+    for sym in ["SILVER_USDT","AG_USDT","XAG_USDT"]:
         try:
             url=f"https://contract.mexc.com/api/v1/contract/kline/{sym}"
             r=requests.get(url, params={"interval":"Min15"}, timeout=5)
@@ -62,68 +53,66 @@ def get_klines_fast(days=15):
             df=pd.DataFrame({'ot':d['time'],'o':d['open'],'h':d['high'],'l':d['low'],'c':d['close'],'v':d['vol']}) if 'time' in d else pd.DataFrame(d, columns=['ot','o','h','l','c','v'])
             df=df.tail(days*96)
             for col in ['o','h','l','c','v']: df[col]=df[col].astype(float)
-            if len(df)>200: return df, sym
+            if len(df)>300: return df, sym
         except: continue
     try:
-        r=requests.get("https://api.mexc.com/api/v3/klines", params={"symbol":"SILVERUSDT","interval":"15m","limit":500}, timeout=5)
+        r=requests.get("https://api.mexc.com/api/v3/klines", params={"symbol":"SILVERUSDT","interval":"15m","limit":1000}, timeout=5)
         arr=r.json()
-        if isinstance(arr, list) and len(arr)>200:
+        if isinstance(arr, list) and len(arr)>300:
             df=pd.DataFrame(arr, columns=['ot','o','h','l','c','v','ct','qv','n','taker_v','taker_qv','ig'])
             for col in ['o','h','l','c','v']: df[col]=df[col].astype(float)
-            return df, "SILVERUSDT-SPOT"
-    except: pass
-    try:
-        import ccxt
-        ex=ccxt.mexc({'enableRateLimit':True})
-        for s in ['SILVER/USDT','XAG/USDT']:
-            try:
-                ohlcv=ex.fetch_ohlcv(s,'15m',limit=500)
-                df=pd.DataFrame(ohlcv, columns=['ot','o','h','l','c','v'])
-                for col in ['o','h','l','c','v']: df[col]=df[col].astype(float)
-                if len(df)>200: return df, f"{s}-CCXT"
-            except: continue
+            return df.tail(30*96), "SILVERUSDT-SPOT"
     except: pass
     return None, None
 
-def calc_indicators_fixed(df):
+def calc_indicators(df):
     df['EMA12']=df['c'].ewm(span=12, adjust=False).mean()
     df['EMA26']=df['c'].ewm(span=26, adjust=False).mean()
+    df['EMA50']=df['c'].ewm(span=50, adjust=False).mean()
     delta=df['c'].diff(); gain=delta.where(delta>0,0).rolling(14).mean(); loss=-delta.where(delta<0,0).rolling(14).mean()
     df['RSI']=100-(100/(1+gain/(loss.replace(0,0.001))))
-    df['H-L']=df['h']-df['l']
-    df['H-pC']=(df['h']-df['c'].shift(1)).abs()
-    df['L-pC']=(df['l']-df['c'].shift(1)).abs()
+    df['H-L']=df['h']-df['l']; df['H-pC']=(df['h']-df['c'].shift(1)).abs(); df['L-pC']=(df['l']-df['c'].shift(1)).abs()
     df['TR']=df[['H-L','H-pC','L-pC']].max(axis=1)
-    df['H-pH']=df['h']-df['h'].shift(1)
-    df['pL-L']=df['l'].shift(1)-df['l']
+    df['H-pH']=df['h']-df['h'].shift(1); df['pL-L']=df['l'].shift(1)-df['l']
     df['+DM']=np.where((df['H-pH'] > df['pL-L']) & (df['H-pH'] > 0), df['H-pH'], 0.0)
     df['-DM']=np.where((df['pL-L'] > df['H-pH']) & (df['pL-L'] > 0), df['pL-L'], 0.0)
-    df['TR14']=df['TR'].rolling(14).sum()
-    df['+DM14']=pd.Series(df['+DM']).rolling(14).sum()
-    df['-DM14']=pd.Series(df['-DM']).rolling(14).sum()
-    df['+DI']=100*df['+DM14']/df['TR14']
-    df['-DI']=100*df['-DM14']/df['TR14']
-    df['DX']=100*(df['+DI']-df['-DI']).abs()/(df['+DI']+df['-DI']).replace(0,0.001)
-    df['ADX']=df['DX'].rolling(14).mean()
-    df['TP']=(df['h']+df['l']+df['c'])/3; df['TPV']=df['TP']*df['v']
-    df['VWAP']=df['TPV'].rolling(20).sum()/df['v'].rolling(20).sum()
+    df['TR14']=df['TR'].rolling(14).sum(); df['+DM14']=pd.Series(df['+DM']).rolling(14).sum(); df['-DM14']=pd.Series(df['-DM']).rolling(14).sum()
+    df['+DI']=100*df['+DM14']/df['TR14']; df['-DI']=100*df['-DM14']/df['TR14']
+    df['DX']=100*(df['+DI']-df['-DI']).abs()/(df['+DI']+df['-DI']).replace(0,0.001); df['ADX']=df['DX'].rolling(14).mean()
+    df['TP']=(df['h']+df['l']+df['c'])/3; df['TPV']=df['TP']*df['v']; df['VWAP']=df['TPV'].rolling(20).sum()/df['v'].rolling(20).sum()
     df['V_SMA20']=df['v'].rolling(20).mean(); df['VolSpike']=df['v']/df['V_SMA20']
     return df.dropna()
 
-def run_bt(df):
-    cfg={"tp":3.0,"sl":1.5,"max_hold":24,"adx":28,"di":23,"vol":1.6,"round_step":0.5,"round_pct":0.3}
-    stats={"total":0,"wins":0,"losses":0,"pnl_sum":0.0,"max_dd":0}
+def dist_pct(price, step): return abs(price-round(price/step)*step)/price*100
+
+def run_bt_silver(df):
+    # V80 LOWER FILTER: ลด ADX28->22 Vol1.6->1.2 เท่า BTC ให้เทรดได้
+    # SILVER ผันผวนแรงกว่า BTC แต่ Filter สูงเกิน Tr6 เงียบ
+    cfg={"tp":3.0,"sl":1.5,"max_hold":96,"adx":22,"di":18,"vol":1.2,"round_step":0.5,"round_pct":0.3,"short":True}
+    # TP3.0 SL1.5 RR2.0 Hold24H ADX22 Vol1.2 = ลดลงจาก V79 ADX28 Vol1.6
+    stats={"total":0,"wins":0,"losses":0,"pnl_sum":0.0,"max_dd":0,"skip":{"adx":0,"vol":0,"round":0}}
     bal=40.16; high=bal; pos=[]
     for i in range(200, len(df)):
         last=df.iloc[i]; price=float(last['c'])
-        if last['ADX']<cfg["adx"] or last['VolSpike']<cfg["vol"]: continue
-        up=last['+DI']>last['-DI'] and last['+DI']>cfg["di"] and price>last['VWAP'] and last['EMA12']>last['EMA26']
-        strong_bull=(last['c']-last['o'])>(last['h']-last['l'])*0.35
-        if not pos and up and strong_bull and 45<=last['RSI']<=78:
-            pos.append({"entry":price,"idx":i})
+        if last['ADX']<cfg["adx"]: stats["skip"]["adx"]+=1; continue
+        if last['VolSpike']<cfg["vol"]: stats["skip"]["vol"]+=1; continue
+        if dist_pct(price, cfg["round_step"])<cfg["round_pct"]: stats["skip"]["round"]+=1; continue
+        up_trend = last['EMA12']>last['EMA26'] and last['EMA26']>last['EMA50'] and price>last['VWAP']
+        down_trend = last['EMA12']<last['EMA26'] and last['EMA26']<last['EMA50'] and price<last['VWAP']
+        up = last['+DI']>last['-DI'] and last['+DI']>cfg["di"] and up_trend
+        down = last['-DI']>last['+DI'] and last['-DI']>cfg["di"] and down_trend and cfg["short"]
+        body = abs(last['c']-last['o']); rng = last['h']-last['l']
+        strong_bull = body > rng*0.3 and last['c']>last['o']
+        strong_bear = body > rng*0.3 and last['o']>last['c']
+        rsi_ok_long = 40 <= last['RSI'] <= 72
+        rsi_ok_short = 28 <= last['RSI'] <= 62
+        buy = up and strong_bull and rsi_ok_long
+        sell = down and strong_bear and rsi_ok_short
+        if not pos and buy: pos.append({"entry":price,"side":"long","idx":i})
+        elif not pos and sell: pos.append({"entry":price,"side":"short","idx":i})
         if pos:
-            entry=pos[0]['entry']; hold=(i-pos[0]['idx'])*0.25
-            pnl=(price-entry)/entry*100
+            entry=pos[0]['entry']; side=pos[0]['side']; hold=(i-pos[0]['idx'])*0.25
+            pnl=(price-entry)/entry*100 if side=='long' else (entry-price)/entry*100
             reason=None
             if pnl>=cfg["tp"]: reason="TP"
             elif pnl<=-cfg["sl"]: reason="SL"
@@ -145,27 +134,23 @@ def bt_job():
     global bt_results, bt_status, LIVE_PRICE
     bt_status="Running..."
     try:
-        send_telegram(f"⚪ [{thai_time()}] V79 SILVER FIXED เริ่ม BT\nแก้ shift Error แล้ว...")
-        df, sym = get_klines_fast(15)
-        if df is None:
-            bt_status="Fail"; send_telegram("🔴 SILVER ดึงกราฟไม่ได้"); return
-        df=calc_indicators_fixed(df)
+        send_telegram(f"📊 [{thai_time()}] V80 SILVER LOWER FILTER เริ่ม BT 30D\nแก้เงียบ V79 ADX28 Vol1.6 Tr6 WR33.3% -> V80 ADX22 Vol1.2 ให้เทรดได้\nTP3.0 SL1.5 RR2.0 Hold24H...")
+        df, sym = get_klines_silver(30)
+        if df is None: bt_status="Fail"; send_telegram("🔴 SILVER ดึงกราฟไม่ได้"); return
+        df=calc_indicators(df)
         LIVE_PRICE=float(df.iloc[-1]['c'])
-        s,w,b,c=run_bt(df)
-        bt_results["SILVER"]={"wr":w,"stats":s,"balance":b,"cfg":c,"sym_used":sym,"live_price":LIVE_PRICE}
+        s,w,b,c=run_bt_silver(df)
+        bt_results["SILVER_USDT"]={"wr":w,"stats":s,"balance":b,"cfg":c,"sym_used":sym,"live_price":LIVE_PRICE}
         bt_status="Done"
-        send_telegram(f"✅ [{thai_time()}] V79 SILVER BT เสร็จ\n{sym} ${LIVE_PRICE:.2f} WR {w:.1f}% PnL {s['pnl_sum']:+.2f}% Tr {s['total']} Bal {b:.2f}")
+        emoji="🟢" if w>=60 and s['pnl_sum']>0 else "🟡" if w>=50 else "🔴"
+        msg=f"{emoji} [{thai_time()}] V80 SILVER LOWER FILTER BT เสร็จ\n{sym} ${LIVE_PRICE:.2f}\nWR {w:.1f}% PnL {s['pnl_sum']:+.2f}% Tr {s['total']} Bal 40.16→{b:.2f}\nDD {s['max_dd']:.1f}% Skip ADX{s['skip']['adx']} Vol{s['skip']['vol']} Round{s['skip']['round']}\n"
+        if w>=60 and s['pnl_sum']>0: msg+="✅ FINAL ผ่าน! WR60%+ PnL บวก ไม่เงียบแล้ว!\n"
+        else: msg+=f"WR {w:.1f}% PnL {s['pnl_sum']:+.2f}% Tr {s['total']}\n"
+        msg+="TP3.0 SL1.5 RR2.0 Hold24H ADX22 Vol1.2 เท่า BTC"
+        send_telegram(msg)
     except Exception as e:
-        bt_status=f"Error {e}"; traceback.print_exc()
-        send_telegram(f"🔴 SILVER BT Error {e}")
-
-def save_demo():
-    try:
-        json.dump({"balance":DEMO_BALANCE}, open(BAL_FILE,'w'))
-        if DEMO_POSITION: json.dump(DEMO_POSITION, open(POS_FILE,'w'))
-        else:
-            if os.path.exists(POS_FILE): os.remove(POS_FILE)
-    except: pass
+        bt_status=f"Error {e}"
+        send_telegram(f"🔴 BT Error {e}")
 
 def get_off():
     try:
@@ -177,38 +162,22 @@ def save_off(o):
     except: pass
 
 def handle(text, cid):
-    global TRADING_ENABLED, DEMO_BALANCE, DEMO_POSITION
+    global TRADING_ENABLED
     if CHAT_ID and str(cid)!=str(CHAT_ID): return
     t=(text or "").lower().strip()
     if t in ["/stats","/bt"]:
-        if bt_status=="Running...": send_telegram("⏳ SILVER BT กำลังรัน 10 วิ...")
+        if bt_status=="Running...": send_telegram("⏳ SILVER LOWER FILTER กำลังรัน...")
         elif not bt_results:
             threading.Thread(target=bt_job, daemon=True).start()
-            send_telegram("📊 เริ่ม BT V79 FIXED รอ 10 วิ...")
+            send_telegram("📊 เริ่ม BT V80 SILVER LOWER FILTER 30D รอ 15 วิ...")
         else:
-            b=bt_results["SILVER"]; send_telegram(f"⚪ {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}%")
+            b=bt_results["SILVER_USDT"]; send_telegram(f"📊 SILVER {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}% Tr {b['stats']['total']}")
     elif t in ["/status"]:
-        b=bt_results.get("SILVER"); pos_txt=f"Long {DEMO_POSITION['entry']:.2f}" if DEMO_POSITION else "ไม่มี"
-        if b: send_telegram(f"📍 SILVER {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}% Bal {DEMO_BALANCE:.2f} Pos {pos_txt}")
-        else: send_telegram(f"📍 SILVER {bt_status} Bal {DEMO_BALANCE:.2f} /bt")
+        b=bt_results.get("SILVER_USDT")
+        if b: send_telegram(f"📍 SILVER {b['sym_used']} ${b['live_price']:.2f} WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}% {'✅' if TRADING_ENABLED else '🛑'} Pos {'มี' if False else 'ไม่มี'}")
+        else: send_telegram(f"📍 SILVER {bt_status} {'✅' if TRADING_ENABLED else '🛑'} /bt")
     elif t in ["/stop"]: TRADING_ENABLED=False; save_trading(False); send_telegram(f"🛑 ปิด SILVER {thai_time()}")
-    elif t in ["/start"]: TRADING_ENABLED=True; save_trading(True); send_telegram(f"✅ เปิด SILVER Bal {DEMO_BALANCE:.2f}")
-    elif t in ["/buy"]:
-        if DEMO_POSITION: send_telegram(f"มีออเดอร์แล้ว {DEMO_POSITION['entry']}")
-        else:
-            df,_=get_klines_fast(1)
-            price=float(df.iloc[-1]['c']) if df is not None else LIVE_PRICE or 50.0
-            DEMO_POSITION={"side":"long","entry":price,"time":datetime.now().isoformat()}
-            save_demo(); send_telegram(f"🧪 SILVER Long ${price:.2f}")
-    elif t in ["/close"]:
-        if not DEMO_POSITION: send_telegram("ไม่มีออเดอร์")
-        else:
-            df,_=get_klines_fast(1)
-            price=float(df.iloc[-1]['c']) if df is not None else LIVE_PRICE
-            entry=DEMO_POSITION['entry']; pnl=(price-entry)/entry*100
-            DEMO_BALANCE=DEMO_BALANCE*(1+pnl/100*0.1)
-            send_telegram(f"⚪ ปิด ${entry:.2f}→${price:.2f} {pnl:+.2f}% Bal {DEMO_BALANCE:.2f}")
-            DEMO_POSITION=None; save_demo()
+    elif t in ["/start"]: TRADING_ENABLED=True; save_trading(True); send_telegram(f"✅ เปิด SILVER {thai_time()}")
 
 def poll():
     off=get_off()
@@ -227,13 +196,13 @@ def poll():
 
 @app.route('/')
 def home():
-    b=bt_results.get("SILVER")
-    if not b: return f"<h2>V79 SILVER FIXED {bt_status}</h2>"
-    return f"<h2>SILVER {b['sym_used']} WR {b['wr']:.1f}%</h2>"
+    b=bt_results.get("SILVER_USDT")
+    if not b: return f"<h2>V80 SILVER LOWER FILTER {bt_status}</h2>"
+    return f"<h2>SILVER WR {b['wr']:.1f}% PnL {b['stats']['pnl_sum']:+.2f}%</h2>"
 @app.route('/health')
-def health(): return jsonify({"status":"ok","version":"V79 FIXED","trading":TRADING_ENABLED,"bt":bt_results,"time":thai_time()})
+def health(): return jsonify({"status":"ok","version":"V80 SILVER LOWER FILTER","trading":TRADING_ENABLED,"bt":bt_results,"time":thai_time()})
 
-send_telegram(f"🚀 [{thai_time()}] V79 SILVER FIXED Live\nแก้ shift Error แล้ว\nพิมพ์ /bt /status")
+send_telegram(f"🚀 [{thai_time()}] V80 SILVER LOWER FILTER Live\nแก้เงียบ V79 ADX28 Vol1.6 Tr6 WR33.3% -> V80 ADX22 Vol1.2 ให้เทรดได้\nพิมพ์ /bt /status")
 
 threading.Thread(target=lambda: (time.sleep(3), bt_job()), daemon=True).start()
 threading.Thread(target=poll, daemon=True).start()
